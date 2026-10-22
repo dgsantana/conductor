@@ -19,6 +19,11 @@ from conductor.providers.capabilities import ProviderCapabilities
 
 _KNOWN_PI_TOOLS = frozenset({"read", "bash", "powershell", "edit", "write", "grep", "find", "ls"})
 
+# Session-map keys for agents with a ``session_key``: ``pi:["<key>", "<cwd>"]``. Namespaced so they
+# cannot collide with the bare agent names unkeyed agents use, or with other providers' entries in
+# the merged map Conductor checkpoints and ``--sessions`` carry.
+_SESSION_KEY_NAMESPACE = "pi:"
+
 
 class PiProvider(AgentProvider):
     """Run Pi SDK sessions through a JSONL Node bridge."""
@@ -38,6 +43,9 @@ class PiProvider(AgentProvider):
         concurrent_safe=True,
         working_dir=True,
         skills=True,
+        # Agents sharing a ``session_key`` continue one Pi session file; unkeyed agents keep
+        # continuing their own (per agent name), as before.
+        session_continuity=True,
         upstream_pin="@earendil-works/pi-coding-agent",
         maintainer="local project",
     )
@@ -54,6 +62,8 @@ class PiProvider(AgentProvider):
         self._bridge = Path(__file__).parent / "_pi" / "runner.mjs"
         self._session_ids: dict[str, str] = {}
         self._resume_session_ids: dict[str, str] = {}
+        # Keyed sessions in use: two executions writing one session file would corrupt it.
+        self._busy: set[str] = set()
 
     async def validate_connection(self) -> bool:
         """Verify bridge can load Pi and see one authenticated model."""
@@ -92,6 +102,14 @@ class PiProvider(AgentProvider):
         """Accept checkpointed Pi session-file paths for next execution."""
         self._resume_session_ids = dict(ids)
 
+    @staticmethod
+    def _slot(agent: AgentDef) -> str:
+        """Session-map key: the shared session for a ``session_key``, else the agent's own."""
+        if agent.session_key is None:
+            return agent.name
+        cwd = agent.working_dir or os.getcwd()
+        return f"{_SESSION_KEY_NAMESPACE}{json.dumps([agent.session_key, cwd])}"
+
     async def execute(
         self,
         agent: AgentDef,
@@ -105,12 +123,52 @@ class PiProvider(AgentProvider):
         extra_mcp_servers: dict[str, Any] | None = None,
         continuation_state: object | None = None,
     ) -> AgentOutput:
-        """Execute through the bridge.
+        """Execute through the bridge, holding the agent's session for the duration.
 
         Args:
             continuation_state: Ignored. In-memory continuation is not supported.
         """
-        del continuation_state
+        slot = self._slot(agent)
+        if agent.session_key is not None:
+            if slot in self._busy:
+                raise ProviderError(
+                    f"Agent '{agent.name}' declares session_key={agent.session_key!r}, but "
+                    "another execution is using that session right now.",
+                    suggestion="Give concurrent executions distinct session_key values, or run "
+                    "them one at a time (max_concurrent: 1).",
+                    provider_name="pi",
+                    is_retryable=False,
+                )
+            self._busy.add(slot)
+        try:
+            return await self._run(
+                agent,
+                rendered_prompt,
+                slot,
+                tools=tools,
+                interrupt_signal=interrupt_signal,
+                event_callback=event_callback,
+                skill_directories=skill_directories,
+                custom_agents=custom_agents,
+                extra_mcp_servers=extra_mcp_servers,
+            )
+        finally:
+            self._busy.discard(slot)
+
+    async def _run(
+        self,
+        agent: AgentDef,
+        rendered_prompt: str,
+        slot: str,
+        *,
+        tools: list[str] | None,
+        interrupt_signal: asyncio.Event | None,
+        event_callback: EventCallback | None,
+        skill_directories: list[str] | None,
+        custom_agents: list[dict[str, Any]] | None,
+        extra_mcp_servers: dict[str, Any] | None,
+    ) -> AgentOutput:
+        """One bridge run for ``agent``, continuing the session recorded under ``slot``."""
         if custom_agents or extra_mcp_servers:
             raise ProviderError(
                 "Pi provider does not support Conductor plugin agents or MCP servers.",
@@ -155,8 +213,7 @@ class PiProvider(AgentProvider):
             },
             "max_parse_recovery_attempts": max_recovery,
             "max_agent_iterations": max_iterations,
-            "session_path": self._resume_session_ids.get(agent.name)
-            or self._session_ids.get(agent.name),
+            "session_path": self._resume_session_ids.get(slot) or self._session_ids.get(slot),
             "tools": tools,
         }
         if event_callback is not None:
@@ -201,11 +258,11 @@ class PiProvider(AgentProvider):
             message = json.loads(line)
             kind = message["type"]
             if kind == "session" and message.get("path"):
-                self._session_ids[agent.name] = message["path"]
+                self._session_ids[slot] = message["path"]
             elif kind == "result":
                 result = message
                 if message.get("session_path"):
-                    self._session_ids[agent.name] = message["session_path"]
+                    self._session_ids[slot] = message["session_path"]
                 break  # One request per process: result is terminal, do not await EOF.
             elif kind == "error":
                 bridge_error = message["error"]
