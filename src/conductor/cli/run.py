@@ -34,6 +34,7 @@ from conductor.providers.registry import ProviderRegistry
 if TYPE_CHECKING:
     from conductor.config.instructions import DiscoveredInstruction
     from conductor.config.schema import ProviderSettings, WorkflowConfig
+    from conductor.engine.workflow import WorkflowEngine
     from conductor.events import WorkflowEvent
     from conductor.fleet.records import RunMode
 
@@ -2165,6 +2166,27 @@ def _write_terminal_record_for_current_process(
         logger.warning("Failed to write terminal run record", exc_info=True)
 
 
+def seed_sessions(registry: ProviderRegistry, path: Path) -> None:
+    """Resume the sessions recorded in ``path`` (a missing file starts fresh)."""
+    if not path.exists():
+        return
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("ids"):
+        registry.set_resume_session_ids(data["ids"])
+    if data.get("cwds"):
+        registry.set_resume_session_cwds(data["cwds"])
+
+
+def save_sessions(engine: WorkflowEngine, path: Path) -> None:
+    """Write the run's final provider session map to ``path`` atomically."""
+    ids, cwds = engine.collect_session_ids()
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(
+        json.dumps({"version": 1, "ids": ids or {}, "cwds": cwds or {}}), encoding="utf-8"
+    )
+    os.replace(tmp, path)
+
+
 async def run_workflow_async(
     workflow_path: Path,
     inputs: dict[str, Any],
@@ -2180,6 +2202,7 @@ async def run_workflow_async(
     workspace_instructions: bool = False,
     cli_instructions: list[str] | None = None,
     print_loaded_instructions: bool = False,
+    sessions_file: Path | None = None,
 ) -> dict[str, Any]:
     """Execute a workflow asynchronously.
 
@@ -2199,6 +2222,10 @@ async def run_workflow_async(
         print_loaded_instructions: If True, print the resolved instruction file
             list (with scope and inclusion reason) to stderr before running.
             No-op unless ``workspace_instructions`` is also True.
+        sessions_file: Optional JSON file holding a provider session map. Its
+            sessions are resumed by agents with a matching ``session_key``, and
+            the run's final map is written back to it, also when the run fails,
+            so an orchestrator can chain runs that continue one session.
 
     Returns:
         The workflow output as a dictionary.
@@ -2420,6 +2447,9 @@ async def run_workflow_async(
 
         # Use ProviderRegistry for multi-provider support
         async with ProviderRegistry(config, mcp_servers=mcp_servers) as registry:
+            if sessions_file is not None:
+                seed_sessions(registry, sessions_file)
+
             # Create and run workflow engine
             verbose_log("Starting workflow execution...")
 
@@ -2477,7 +2507,11 @@ async def run_workflow_async(
                         Text.from_markup("[dim]Press Esc to interrupt and provide guidance[/dim]")
                     )
 
-                result = await _run_with_stop_signal(engine, inputs, dashboard)
+                try:
+                    result = await _run_with_stop_signal(engine, inputs, dashboard)
+                finally:
+                    if sessions_file is not None:
+                        save_sessions(engine, sessions_file)
             except WorkflowTerminated as exc:
                 # Explicit `type: terminate status: failed` is an intentional
                 # outcome, not a crash — defer the raise so the dashboard

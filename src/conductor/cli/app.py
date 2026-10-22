@@ -595,6 +595,17 @@ def run(
             help="Auto-select first option at human gates (for automation).",
         ),
     ] = False,
+    sessions: Annotated[
+        str | None,
+        typer.Option(
+            "--sessions",
+            help=(
+                "JSON file with a provider session map: agents with a matching "
+                "session_key resume those sessions, and the run's final map is "
+                "written back to it (orchestrators chaining runs)."
+            ),
+        ),
+    ] = None,
     log_file: Annotated[
         str | None,
         typer.Option(
@@ -766,6 +777,10 @@ def run(
         else:
             resolved_log_file = Path(log_file)
 
+    if sessions is not None and web_bg:
+        print_error(ValueError("--sessions is not supported with --web-bg"))
+        raise typer.Exit(code=1)
+
     # Handle --web-bg: fork a background process and exit immediately
     if web_bg:
         # Background human gates are now resolvable from the dashboard /
@@ -832,6 +847,7 @@ def run(
                 workspace_instructions=workspace_instructions,
                 cli_instructions=raw_instructions,
                 print_loaded_instructions=print_loaded_instructions,
+                sessions_file=Path(sessions) if sessions is not None else None,
             )
         )
 

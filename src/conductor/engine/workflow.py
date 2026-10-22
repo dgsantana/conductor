@@ -3378,33 +3378,12 @@ class WorkflowEngine:
         """
         self.limits = limits
 
-    def _write_checkpoint(
-        self, error: BaseException | None, trigger: CheckpointTrigger
-    ) -> Path | None:
-        """Serialize the current workflow state to a checkpoint file.
+    def collect_session_ids(self) -> tuple[dict[str, str] | None, dict[str, str] | None]:
+        """Merged provider session map and session cwds, for checkpoints and ``--sessions``.
 
-        Shared by the on-failure and periodic checkpoint paths. Collects
-        session IDs from every provider that records them — Copilot per agent
-        name, ``claude-agent-sdk`` per namespaced ``session_key`` — and
-        delegates to :meth:`CheckpointManager.save_checkpoint`, which never
-        raises.
-
-        Args:
-            error: The exception that triggered the save, or ``None`` for a
-                periodic checkpoint.
-            trigger: ``"failure"`` or ``"periodic"``.
-
-        Returns:
-            Path to the saved checkpoint, or ``None`` when no ``workflow_path``
-            is set or saving failed.
+        Never raises: a provider that fails costs only its own sessions, and
+        an unexpected failure returns ``(None, None)``.
         """
-        if self.workflow_path is None:
-            logger.debug("No workflow_path set; skipping checkpoint save")
-            return None
-
-        # Collect session IDs from provider if available. Best-effort: a
-        # provider raising here must not break the (failure or periodic)
-        # checkpoint save, so the "never raises" contract holds for both paths.
         copilot_session_ids: dict[str, str] | None = None
         copilot_session_cwds: dict[str, str] | None = None
         try:
@@ -3454,6 +3433,36 @@ class WorkflowEngine:
             logger.debug("Session ID collection traceback", exc_info=True)
             copilot_session_ids = None
             copilot_session_cwds = None
+
+        return copilot_session_ids, copilot_session_cwds
+
+    def _write_checkpoint(
+        self, error: BaseException | None, trigger: CheckpointTrigger
+    ) -> Path | None:
+        """Serialize the current workflow state to a checkpoint file.
+
+        Shared by the on-failure and periodic checkpoint paths. Collects
+        session IDs from every provider that records them — Copilot per agent
+        name, ``claude-agent-sdk`` per namespaced ``session_key`` — and
+        delegates to :meth:`CheckpointManager.save_checkpoint`, which never
+        raises.
+
+        Args:
+            error: The exception that triggered the save, or ``None`` for a
+                periodic checkpoint.
+            trigger: ``"failure"`` or ``"periodic"``.
+
+        Returns:
+            Path to the saved checkpoint, or ``None`` when no ``workflow_path``
+            is set or saving failed.
+        """
+        if self.workflow_path is None:
+            logger.debug("No workflow_path set; skipping checkpoint save")
+            return None
+
+        # Best-effort: a provider raising here must not break the (failure or
+        # periodic) checkpoint save, so the "never raises" contract holds.
+        copilot_session_ids, copilot_session_cwds = self.collect_session_ids()
 
         return CheckpointManager.save_checkpoint(
             workflow_path=self.workflow_path,
