@@ -14,6 +14,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, get_args
 
 from conductor.exceptions import ExecutionError, ValidationError
+from conductor.executor.once import SessionMemory
 from conductor.executor.output import parse_json_output, validate_output
 from conductor.executor.template import TemplateRenderer
 from conductor.mcp_auth import resolve_mcp_servers
@@ -211,6 +212,7 @@ class AgentExecutor:
         workflow_plugins: list[PluginDef] | None = None,
         plugin_marketplaces: Mapping[str, Marketplace] | None = None,
         declared_plugin_sources: Iterable[str] | None = None,
+        session_memory: SessionMemory | None = None,
     ) -> None:
         """Initialize the AgentExecutor.
 
@@ -288,6 +290,8 @@ class AgentExecutor:
             list[ResolvedPlugin],
         ] = {}
         self.renderer = TemplateRenderer()
+        # Shared with the engine's other executors; a private one when used alone.
+        self._session_memory = session_memory or SessionMemory()
 
     def set_plugin_marketplaces(self, marketplaces: Mapping[str, Marketplace]) -> None:
         """Replace the marketplace table plugin entries resolve against.
@@ -474,7 +478,9 @@ class AgentExecutor:
                 )
             rendered_prompt = guidance_section or ""
         else:
-            rendered_prompt = self.renderer.render(agent.prompt, context)
+            # In a session, `| once` leaves out what the conversation already holds.
+            with self._session_memory.scope(agent.session_key):
+                rendered_prompt = self.renderer.render(agent.prompt, context)
             prefix = self._build_prompt_prefix(agent, event_callback)
             if prefix:
                 rendered_prompt = prefix + rendered_prompt
@@ -599,6 +605,8 @@ class AgentExecutor:
         # Validate output against schema (skip for partial output from interrupts)
         if agent.output and not output.partial:
             validate_output(output.content, agent.output, warn_undeclared_keys=True)
+        if agent.session_key and not output.partial:
+            self._session_memory.remember(agent.session_key, output.content)
 
         return output
 

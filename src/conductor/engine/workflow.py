@@ -53,6 +53,7 @@ from conductor.executor.mcp_step import (
     mcp_result_bytes,
     mcp_truncation_metadata,
 )
+from conductor.executor.once import SessionMemory
 from conductor.executor.output import validate_output
 from conductor.executor.script import ScriptExecutor, ScriptOutput
 from conductor.executor.set_step import (
@@ -493,6 +494,7 @@ class WorkflowEngine:
         plugin_marketplaces: Mapping[str, Marketplace] | None = None,
         _guidance_channel: GuidanceChannel | None = None,
         _inherited_bg_mode: bool = False,
+        session_memory: SessionMemory | None = None,
     ) -> None:
         """Initialize the WorkflowEngine.
 
@@ -659,6 +661,9 @@ class WorkflowEngine:
         # them — a programmatic embedder can supply them via
         # ``set_plugin_marketplaces``.
         self._plugin_marketplaces: dict[str, Marketplace] = dict(plugin_marketplaces or {})
+        # What each session (`session_key`) has been sent or produced, for `| once`;
+        # seeded from and saved to `conductor run --sessions`.
+        self.session_memory = session_memory or SessionMemory()
         self._declared_plugin_sources = frozenset(config.workflow.runtime.plugin_sources)
 
         # For backward compatibility, create a default executor with single provider
@@ -675,6 +680,7 @@ class WorkflowEngine:
                 workflow_plugins=self._workflow_plugins,
                 plugin_marketplaces=self._plugin_marketplaces,
                 declared_plugin_sources=self._declared_plugin_sources,
+                session_memory=self.session_memory,
             )
             self.provider = provider  # Keep for backward compatibility
         else:
@@ -1710,6 +1716,7 @@ class WorkflowEngine:
                 workflow_plugins=self._workflow_plugins,
                 plugin_marketplaces=self._plugin_marketplaces,
                 declared_plugin_sources=self._declared_plugin_sources,
+                session_memory=self.session_memory,
             )
         elif self.executor is not None:
             # Single provider mode (backward compatibility)

@@ -28,6 +28,7 @@ from conductor.config.loader import load_config
 from conductor.console import MarkupFreeConsole, join, make_console, styled
 from conductor.engine.workflow import ExecutionPlan, WorkflowEngine
 from conductor.exceptions import WorkflowTerminated
+from conductor.executor.once import SessionMemory
 from conductor.mcp_auth import resolve_mcp_server_config
 from conductor.providers.registry import ProviderRegistry
 
@@ -2166,15 +2167,19 @@ def _write_terminal_record_for_current_process(
         logger.warning("Failed to write terminal run record", exc_info=True)
 
 
-def seed_sessions(registry: ProviderRegistry, path: Path) -> None:
-    """Resume the sessions recorded in ``path`` (a missing file starts fresh)."""
+def seed_sessions(registry: ProviderRegistry, path: Path) -> SessionMemory:
+    """Resume the sessions recorded in ``path`` (a missing file starts fresh).
+
+    Returns what those sessions have already seen, for the engine's ``once``.
+    """
     if not path.exists():
-        return
+        return SessionMemory()
     data = json.loads(path.read_text(encoding="utf-8"))
     if data.get("ids"):
         registry.set_resume_session_ids(data["ids"])
     if data.get("cwds"):
         registry.set_resume_session_cwds(data["cwds"])
+    return SessionMemory(data.get("seen"))
 
 
 def save_sessions(engine: WorkflowEngine, path: Path) -> None:
@@ -2190,6 +2195,8 @@ def save_sessions(engine: WorkflowEngine, path: Path) -> None:
         "version": 1,
         "ids": {**previous.get("ids", {}), **(ids or {})},
         "cwds": {**previous.get("cwds", {}), **(cwds or {})},
+        # The engine's memory started from the file's, so it already includes it.
+        "seen": engine.session_memory.to_json(),
     }
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(data), encoding="utf-8")
@@ -2456,8 +2463,7 @@ async def run_workflow_async(
 
         # Use ProviderRegistry for multi-provider support
         async with ProviderRegistry(config, mcp_servers=mcp_servers) as registry:
-            if sessions_file is not None:
-                seed_sessions(registry, sessions_file)
+            session_memory = seed_sessions(registry, sessions_file) if sessions_file else None
 
             # Create and run workflow engine
             verbose_log("Starting workflow execution...")
@@ -2489,6 +2495,7 @@ async def run_workflow_async(
                 web_dashboard=dashboard,
                 instructions_preamble=instructions_preamble,
                 plugin_marketplaces=plugin_marketplaces,
+                session_memory=session_memory,
                 run_context=RunContext(
                     run_id=event_log_subscriber.run_id if event_log_subscriber else "",
                     log_file=str(event_log_subscriber.path) if event_log_subscriber else "",

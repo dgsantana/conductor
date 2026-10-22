@@ -22,6 +22,7 @@ from jinja2 import UndefinedError as Jinja2UndefinedError
 
 from conductor.config.loader import resolve_env_vars
 from conductor.exceptions import ConfigurationError, TemplateError
+from conductor.executor.once import once_filter
 from conductor.file_string import FileString
 
 
@@ -102,6 +103,7 @@ class TemplateRenderer:
         """Register custom filters on the Jinja2 environment."""
         env.filters["json"] = self._json_filter
         env.filters["default"] = self._default_filter
+        env.filters["once"] = once_filter
 
     @staticmethod
     def _json_filter(value: Any, indent: int = 2) -> str:
