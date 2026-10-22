@@ -2178,12 +2178,21 @@ def seed_sessions(registry: ProviderRegistry, path: Path) -> None:
 
 
 def save_sessions(engine: WorkflowEngine, path: Path) -> None:
-    """Write the run's final provider session map to ``path`` atomically."""
+    """Write the run's final provider session map to ``path`` atomically.
+
+    The file's existing entries are kept and the run's own laid over them: a
+    run whose providers never started (only script steps, or a provider not
+    used this time) must not erase sessions later runs will resume.
+    """
+    previous = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     ids, cwds = engine.collect_session_ids()
+    data = {
+        "version": 1,
+        "ids": {**previous.get("ids", {}), **(ids or {})},
+        "cwds": {**previous.get("cwds", {}), **(cwds or {})},
+    }
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(
-        json.dumps({"version": 1, "ids": ids or {}, "cwds": cwds or {}}), encoding="utf-8"
-    )
+    tmp.write_text(json.dumps(data), encoding="utf-8")
     os.replace(tmp, path)
 
 

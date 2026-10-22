@@ -28,6 +28,19 @@ from conductor.engine.workflow import WorkflowEngine  # noqa: E402
 from conductor.providers.claude_agent_sdk import ClaudeAgentSdkProvider  # noqa: E402
 from conductor.providers.registry import ProviderRegistry  # noqa: E402
 
+_SCRIPT_STAGE = """
+workflow:
+  name: qa
+  entry_point: check
+agents:
+  - name: check
+    type: script
+    command: python
+    args: ["-c", "print('{}')"]
+    routes:
+      - to: $end
+"""
+
 _STAGE = """
 workflow:
   name: {name}
@@ -81,10 +94,12 @@ class _FakeQuery:
         return gen()
 
 
-async def _run_stage(tmp_path: Path, name: str, sessions: Path, fake: _FakeQuery) -> None:
+async def _run_stage(
+    tmp_path: Path, name: str, sessions: Path, fake: _FakeQuery, text: str | None = None
+) -> None:
     """One orchestrator stage: a separate registry and engine, like a separate `conductor run`."""
     path = tmp_path / f"{name}.yaml"
-    path.write_text(_STAGE.format(name=name))
+    path.write_text(text if text is not None else _STAGE.format(name=name))
     config = load_workflow(path)
     async with ProviderRegistry(config, mcp_servers=None) as registry:
         seed_sessions(registry, sessions)
@@ -120,3 +135,16 @@ async def test_without_a_sessions_file_each_run_starts_fresh(tmp_path: Path) -> 
     await _run_stage(tmp_path, "spec", tmp_path / "a.json", fake)
     await _run_stage(tmp_path, "implement", tmp_path / "b.json", fake)
     assert fake.resumes == [None, None]
+
+
+async def test_a_run_without_agent_steps_keeps_the_sessions(tmp_path: Path) -> None:
+    """A script-only stage between two agent stages (qa between implement and pr) has no
+    provider to collect from; writing back must not erase the session the next stage resumes."""
+    sessions = tmp_path / "sessions.json"
+    fake = _FakeQuery()
+
+    await _run_stage(tmp_path, "implement", sessions, fake)
+    await _run_stage(tmp_path, "qa", sessions, fake, text=_SCRIPT_STAGE)
+    await _run_stage(tmp_path, "fix", sessions, fake)
+
+    assert fake.resumes == [None, "sess-1"]
