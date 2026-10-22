@@ -113,6 +113,7 @@ _CREDENTIAL_SPECS: dict[str, _CredentialSpec] = {
     "openai": _CredentialSpec(env_vars=("OPENAI_API_KEY",)),
     "hermes": _CredentialSpec(),
     "pi": _CredentialSpec(optional_auth_note="authenticates through Pi's local auth/config files"),
+    "host": _CredentialSpec(optional_auth_note="no credentials; the orchestrator answers tasks"),
 }
 
 # Update-check opt-out env var (mirrors cli/update.py so diagnostics does not
@@ -483,6 +484,10 @@ def _sdk_available(name: str) -> bool:
             from conductor.providers.pi import PiProvider
 
             return shutil.which("node") is not None and PiProvider()._bridge.is_file()
+        if name == "host":
+            from conductor.providers.host import HOST_DIR_ENV
+
+            return bool(os.environ.get(HOST_DIR_ENV))
     except Exception:  # noqa: BLE001 - diagnostics must never raise
         return False
     return False

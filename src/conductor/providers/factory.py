@@ -22,6 +22,7 @@ from conductor.providers.claude_agent_sdk import (
 from conductor.providers.context_tier import ContextTier
 from conductor.providers.copilot import CopilotProvider, IdleRecoveryConfig
 from conductor.providers.hermes import HERMES_SDK_AVAILABLE, HermesProvider
+from conductor.providers.host import HostProvider
 from conductor.providers.openai import OPENAI_SDK_AVAILABLE, OpenAIProvider
 from conductor.providers.pi import PiProvider
 from conductor.providers.reasoning import ReasoningEffort
@@ -282,6 +283,13 @@ async def create_provider(
                 max_session_seconds=max_session_seconds,
                 max_agent_iterations=max_agent_iterations,
             )
+        case "host":
+            if temperature is not None or max_tokens is not None:
+                raise ProviderError(
+                    "The host provider does not support Conductor `temperature` or `max_tokens`.",
+                    suggestion="Remove those runtime fields; the host chooses how to run the step.",
+                )
+            provider = HostProvider(model=default_model, max_session_seconds=max_session_seconds)
         case "aca":
             if not AZURE_IDENTITY_AVAILABLE:
                 raise ProviderError(

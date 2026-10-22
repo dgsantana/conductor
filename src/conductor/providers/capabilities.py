@@ -377,6 +377,7 @@ _PROVIDER_CLASS_PATHS: Final[dict[str, str]] = {
     "hermes": "conductor.providers.hermes:HermesProvider",
     "aca": "conductor.providers.aca:AcaRuntimeProvider",
     "pi": "conductor.providers.pi:PiProvider",
+    "host": "conductor.providers.host:HostProvider",
 }
 
 # Provider names that appear in the schema / factory but are not yet
