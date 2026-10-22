@@ -639,13 +639,11 @@ class TestToolResolution:
 
     @patch("conductor.providers.claude_agent_sdk.CLAUDE_AGENT_SDK_AVAILABLE", True)
     @patch("conductor.providers.claude_agent_sdk.ClaudeAgentOptions", Mock)
-    async def test_non_empty_tools_list_raises(self) -> None:
-        """Non-empty workflow tool allowlists are refused loudly.
+    async def test_unknown_tool_names_raise(self) -> None:
+        """Names with no Claude Code equivalent are refused, not guessed.
 
-        Conductor workflow tool names do not translate to Claude CLI tool
-        IDs. Forwarding them would either silently grant the wrong native
-        tools or silently drop the allowlist — both unsafe. Refuse loudly
-        until proper name translation is implemented.
+        Forwarding them would either silently grant the wrong native tools
+        or silently drop part of the allowlist — both unsafe.
         """
 
         async def fake_query(**kwargs):
@@ -654,13 +652,57 @@ class TestToolResolution:
         with patch("conductor.providers.claude_agent_sdk.query", fake_query):
             provider = ClaudeAgentSdkProvider()
             agent = AgentDef(name="my_agent", prompt="hi")
-            with pytest.raises(ProviderError, match="does not support workflow tool allowlists"):
+            with pytest.raises(ProviderError, match=r"\['read_file', 'search'\] has no Claude Code equivalent"):
                 await provider.execute(
                     agent=agent,
                     context={},
                     rendered_prompt="hi",
-                    tools=["search", "read_file"],
+                    tools=["read", "search", "read_file"],
                 )
+
+    @patch("conductor.providers.claude_agent_sdk.CLAUDE_AGENT_SDK_AVAILABLE", True)
+    async def test_allowlist_grants_exactly_the_translated_tools(self) -> None:
+        """A read-only allowlist in the shared (pi) vocabulary becomes exactly
+        Claude's read-only tools: no Edit, Write or Bash slips in, and
+        ``find`` / ``ls`` collapse onto one ``Glob``."""
+        options_mock = Mock()
+
+        async def fake_query(**kwargs):
+            yield _result(result="done")
+
+        with (
+            patch("conductor.providers.claude_agent_sdk.query", fake_query),
+            patch("conductor.providers.claude_agent_sdk.ClaudeAgentOptions", options_mock),
+        ):
+            provider = ClaudeAgentSdkProvider()
+            agent = AgentDef(name="review", prompt="hi", tools=["read", "grep", "find", "ls"])
+            await provider.execute(
+                agent=agent, context={}, rendered_prompt="hi", tools=["read", "grep", "find", "ls"]
+            )
+
+        call_kwargs = options_mock.call_args[1]
+        assert call_kwargs["tools"] == ["Read", "Grep", "Glob"]
+        assert call_kwargs["permission_mode"] == "bypassPermissions"
+
+    @patch("conductor.providers.claude_agent_sdk.CLAUDE_AGENT_SDK_AVAILABLE", True)
+    async def test_allowlist_accepts_claude_tool_ids(self) -> None:
+        """Claude Code's own tool IDs pass through unchanged."""
+        options_mock = Mock()
+
+        async def fake_query(**kwargs):
+            yield _result(result="done")
+
+        with (
+            patch("conductor.providers.claude_agent_sdk.query", fake_query),
+            patch("conductor.providers.claude_agent_sdk.ClaudeAgentOptions", options_mock),
+        ):
+            provider = ClaudeAgentSdkProvider()
+            agent = AgentDef(name="code", prompt="hi", tools=["Read", "edit", "WebFetch"])
+            await provider.execute(
+                agent=agent, context={}, rendered_prompt="hi", tools=["Read", "edit", "WebFetch"]
+            )
+
+        assert options_mock.call_args[1]["tools"] == ["Read", "Edit", "WebFetch"]
 
 
 class TestOmittedToolsDefaultPreset:
@@ -740,8 +782,8 @@ class TestOmittedToolsDefaultPreset:
 
     @patch("conductor.providers.claude_agent_sdk.CLAUDE_AGENT_SDK_AVAILABLE", True)
     @patch("conductor.providers.claude_agent_sdk.ClaudeAgentOptions", Mock)
-    async def test_explicit_non_empty_tools_still_raises(self) -> None:
-        """An explicit non-empty per-agent allowlist is still refused loudly.
+    async def test_explicit_unknown_tools_still_raise(self) -> None:
+        """An explicit allowlist of names with no Claude Code equivalent is refused loudly.
 
         Captures the exception so both the message AND the ``suggestion`` (also
         reworded by this fix) are pinned — a regression that drops the
@@ -762,7 +804,7 @@ class TestOmittedToolsDefaultPreset:
                     tools=["search", "read_file"],
                 )
 
-        assert "does not support workflow tool allowlists" in str(exc.value)
+        assert "has no Claude Code equivalent" in str(exc.value)
         assert exc.value.suggestion is not None
         assert "tools: []" in exc.value.suggestion
 

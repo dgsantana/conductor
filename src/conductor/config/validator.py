@@ -2122,6 +2122,19 @@ def _validate_provider_capabilities(
                     f"tools for this provider yet. Remove 'tools: []' or the workflow's "
                     f"'mcp_servers:' entirely."
                 )
+        elif (
+            agent.tools is not None
+            and caps.mcp_tools
+            and workflow_mcp_servers
+            and not caps.tool_allowlist_covers_mcp
+        ):
+            errors.append(
+                f"Agent '{agent.name}' declares tools={agent.tools!r}, but provider "
+                f"'{provider_name}' applies the allowlist to its built-in tools only "
+                f"and keeps every configured MCP server attached "
+                f"(capabilities.tool_allowlist_covers_mcp=False). Remove the agent's "
+                f"'tools:' or the workflow's 'mcp_servers:'."
+            )
         elif agent.tools is None and config.tools and not caps.workflow_tools_passthrough:
             errors.append(
                 f"Agent '{agent.name}' omits 'tools:' and would inherit the "

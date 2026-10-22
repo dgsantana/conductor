@@ -213,6 +213,25 @@ def _build_output_format(output: dict[str, OutputField]) -> dict[str, Any]:
 # workflow-tools copy, which is empty only when the workflow declares no `tools:`.
 _DEFAULT_TOOL_PRESET: dict[str, str] = {"type": "preset", "preset": "claude_code"}
 
+# Workflow tool names this provider honours in a ``tools:`` allowlist, mapped
+# to Claude Code's built-in tool IDs. The lowercase names are the vocabulary
+# the ``pi`` provider already uses, so one allowlist works on both providers;
+# Claude Code IDs are also accepted as written. Anything else is refused
+# rather than guessed (an MCP tool name, a Copilot tool name).
+_CLAUDE_TOOL_IDS: dict[str, str] = {
+    "read": "Read",
+    "write": "Write",
+    "edit": "Edit",
+    "grep": "Grep",
+    "find": "Glob",
+    "ls": "Glob",
+    "bash": "Bash",
+    "powershell": "PowerShell",
+}
+_CLAUDE_NATIVE_TOOLS: frozenset[str] = frozenset(
+    {*_CLAUDE_TOOL_IDS.values(), "NotebookEdit", "WebFetch", "WebSearch", "TodoWrite"}
+)
+
 # Native CLI tool that loads an enabled skill on demand. An explicit
 # ``tools: []`` sends ``--tools ""`` (empty base tool set), which would leave a
 # declared skill unreachable, so this one tool is granted back when skills are
@@ -617,14 +636,12 @@ class ClaudeAgentSdkProvider(AgentProvider):
         # Per-agent ``tools: []`` disables all *built-in* tools except the
         # ``Skill`` loader when skills are enabled; declared MCP servers
         # still attach (the SDK has no per-request MCP toggle), which
-        # is why the validator rejects ``tools: []`` alongside ``mcp_servers:``
-        # for this provider. Per-agent ``tools: [<names>]`` is refused loudly
-        # at execute time because workflow tool names do not translate to
-        # Claude CLI tool IDs.
-        # The capability records the strict end of that contract — when the
-        # user declares a non-empty allowlist, the validator surfaces it as
-        # an error before runtime hits the refusal.
-        workflow_tools_passthrough=False,
+        # is why the validator rejects any explicit ``tools:`` alongside
+        # ``mcp_servers:`` for this provider (``tool_allowlist_covers_mcp``).
+        # A non-empty allowlist is translated to Claude Code tool IDs
+        # (``_CLAUDE_TOOL_IDS``); unknown names are refused at execute time.
+        workflow_tools_passthrough=True,
+        tool_allowlist_covers_mcp=False,
         # The SDK yields messages incrementally via the async iterator —
         # ``agent_message`` / ``agent_tool_*`` events fire as they arrive.
         streaming_events=True,
@@ -1635,10 +1652,11 @@ class ClaudeAgentSdkProvider(AgentProvider):
     ) -> tuple[Any, str | None]:
         """Resolve the SDK ``tools`` and ``permission_mode`` for an agent.
 
-        Conductor's ``tools:`` allowlist contains workflow-tool names that
-        resolve through ``runtime.tools`` — they are NOT Claude CLI tool
-        identifiers. We therefore refuse to forward a non-empty allowlist
-        to the SDK rather than silently grant the wrong native tools.
+        Conductor's ``tools:`` allowlist contains workflow-tool names, not
+        Claude CLI tool identifiers. Names in ``_CLAUDE_TOOL_IDS`` (the
+        vocabulary ``pi`` uses) and Claude Code's own IDs are translated;
+        any other name is refused rather than guessed, which would silently
+        grant the wrong native tools.
 
         The ``tools`` argument is the executor's *resolved* list from
         :func:`conductor.executor.agent.resolve_agent_tools`. Since the
@@ -1661,11 +1679,11 @@ class ClaudeAgentSdkProvider(AgentProvider):
           When skills are enabled, grant the ``Skill`` tool back: an empty
           base tool set would otherwise leave the declared skill unreachable,
           silently ignoring the ``skills:`` the workflow asked for.
-        * ``tools`` non-empty — raise ``ProviderError``. Workflow tool
-          name → CLI tool ID translation is not implemented (tracked as
-          a follow-up). Silently dropping the allowlist would be a
-          security regression; silently passing it through could grant
-          the wrong native tool. Refuse loudly.
+        * ``tools`` non-empty — translate to Claude Code tool IDs and grant
+          exactly those, with the permission bypass (a headless agent cannot
+          answer prompts). An unknown name raises ``ProviderError``: silently
+          dropping it could leave the agent without a tool it needs, silently
+          passing it through could grant the wrong one.
 
         Args:
             tools: The executor-resolved ``tools:`` allowlist for this agent.
@@ -1686,7 +1704,8 @@ class ClaudeAgentSdkProvider(AgentProvider):
             ``ClaudeAgentOptions``.
 
         Raises:
-            ProviderError: If ``tools`` is a non-empty list.
+            ProviderError: If ``tools`` names a tool with no Claude Code
+                equivalent, or the allowlist would strand plugin subagents.
         """
         if not tools:
             # The executor passes [] for BOTH "omitted (no workflow tools to
@@ -1721,18 +1740,34 @@ class ClaudeAgentSdkProvider(AgentProvider):
             if skills_enabled:
                 return [_SKILL_TOOL], None
             return [], None
-        raise ProviderError(
-            f"Agent '{agent.name}' resolves to tools={tools!r} (declared on "
-            "the agent or inherited from the workflow-level 'tools:' list), "
-            "but claude-agent-sdk does not support workflow tool allowlists "
-            "(workflow tool names do not translate to Claude CLI tool IDs).",
-            suggestion=(
-                "Omit both the per-agent and workflow-level 'tools:' to grant "
-                "the full claude_code preset, or set 'tools: []' to disable "
-                "every built-in tool (bar the Skill loader when the agent "
-                "declares skills)."
-            ),
+        unknown = sorted(
+            {t for t in tools if t not in _CLAUDE_TOOL_IDS and t not in _CLAUDE_NATIVE_TOOLS}
         )
+        if unknown:
+            raise ProviderError(
+                f"Agent '{agent.name}' resolves to tools={tools!r} (declared on "
+                "the agent or inherited from the workflow-level 'tools:' list), "
+                f"but {unknown!r} has no Claude Code equivalent.",
+                suggestion=(
+                    f"Use {sorted(_CLAUDE_TOOL_IDS)} or Claude Code tool IDs "
+                    f"{sorted(_CLAUDE_NATIVE_TOOLS)}, omit 'tools:' for the full "
+                    "claude_code preset, or set 'tools: []' to disable every "
+                    "built-in tool."
+                ),
+                is_retryable=False,
+            )
+        if agents_enabled:
+            raise ProviderError(
+                f"Agent '{agent.name}' restricts tools to {tools!r} while its plugins "
+                "ship subagents; the allowlist leaves the model no way to dispatch "
+                "to them.",
+                suggestion="Omit 'tools:' or set 'agents: false' on the plugins.",
+                is_retryable=False,
+            )
+        granted = list(dict.fromkeys(_CLAUDE_TOOL_IDS.get(t, t) for t in tools))
+        if skills_enabled:
+            granted.append(_SKILL_TOOL)
+        return granted, "bypassPermissions"
 
     @staticmethod
     def _process_assistant_blocks(

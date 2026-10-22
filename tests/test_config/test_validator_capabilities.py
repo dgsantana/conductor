@@ -1811,7 +1811,7 @@ class TestClaudeAgentSdkRealCapabilitiesCrossCheck:
             agents=[AgentDef(name="a", prompt="hi", tools=[])],
             mcp_servers={"docs": MCPServerDef(command="docs-server")},
         )
-        with pytest.raises(ConfigurationError, match="there is no way to disable tools"):
+        with pytest.raises(ConfigurationError, match="tool_allowlist_covers_mcp=False"):
             validate_workflow_config(config)
 
     def test_empty_tools_without_mcp_servers_is_allowed(self, patch_caps: Any) -> None:
@@ -1821,11 +1821,23 @@ class TestClaudeAgentSdkRealCapabilitiesCrossCheck:
         config = self._sdk_workflow(agents=[AgentDef(name="a", prompt="hi", tools=[])])
         validate_workflow_config(config)  # no raise
 
-    def test_non_empty_tools_is_still_rejected(self, patch_caps: Any) -> None:
-        """``workflow_tools_passthrough`` stays False — #335 did not change it."""
+    def test_non_empty_tools_without_mcp_servers_is_allowed(self, patch_caps: Any) -> None:
+        """The allowlist is translated to Claude Code tool IDs, so it passes
+        validation; unknown names are refused when the agent runs."""
         self._patch(patch_caps)
-        config = self._sdk_workflow(agents=[AgentDef(name="a", prompt="hi", tools=["search"])])
-        with pytest.raises(ConfigurationError, match="does not honor per-agent tool allowlists"):
+        config = self._sdk_workflow(agents=[AgentDef(name="a", prompt="hi", tools=["read", "grep"])])
+        config = config.model_copy(update={"tools": ["read", "grep"]})
+        validate_workflow_config(config)  # no raise
+
+    def test_non_empty_tools_with_mcp_servers_is_rejected(self, patch_caps: Any) -> None:
+        """The allowlist restricts built-in tools only; MCP servers would stay
+        attached, so a declared allowlist would not mean what it says."""
+        self._patch(patch_caps)
+        config = self._sdk_workflow(
+            agents=[AgentDef(name="a", prompt="hi", tools=["read"])],
+            mcp_servers={"docs": MCPServerDef(command="docs-server")},
+        )
+        with pytest.raises(ConfigurationError, match="tool_allowlist_covers_mcp=False"):
             validate_workflow_config(config)
 
     def test_agent_working_dir_is_accepted(self, patch_caps: Any) -> None:
